@@ -9,13 +9,6 @@ from datetime import datetime
 from langchain_core.messages import BaseMessage
 
 
-class WorkflowPhase(str):
-    PLAN = "plan"
-    EXECUTE = "execute"
-    REPLAN = "replan"
-    COMPLETE = "complete"
-
-
 class TripPlannerState(TypedDict):
     """旅行规划工作流状态"""
     

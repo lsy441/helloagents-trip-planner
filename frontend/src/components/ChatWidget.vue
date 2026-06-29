@@ -100,9 +100,9 @@
 import { ref, nextTick, watch, computed, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import axios from 'axios'
-import { getChatSessions, getChatSession, deleteChatSession, type SessionInfo } from '@/services/api'
+import { getChatSessions, getChatSession, deleteChatSession, getSessionId, setSessionId, clearSessionId, type SessionInfo } from '@/services/api'
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
+const API_BASE = import.meta.env.VITE_API_BASE_URL || ''
 
 interface ChatAction {
   type: string
@@ -119,6 +119,7 @@ const emit = defineEmits<{
   (e: 'fill-form', data: Record<string, any>): void
   (e: 'adjust-plan', data: { target: string; feedback: string }): void
   (e: 'navigate', data: { to: string }): void
+  (e: 'generate-trip', data: Record<string, any>): void
 }>()
 
 const route = useRoute()
@@ -139,10 +140,10 @@ const showHistory = ref(false)
 const sessions = ref<SessionInfo[]>([])
 
 onMounted(() => {
-  const savedSessionId = localStorage.getItem('chat_session_id')
-  if (savedSessionId) {
-    sessionId.value = savedSessionId
-    loadSessionHistory(savedSessionId)
+  const sid = getSessionId()
+  if (sid) {
+    sessionId.value = sid
+    loadSessionHistory(sid)
   }
 })
 
@@ -166,7 +167,7 @@ async function toggleHistory() {
 
 async function switchSession(sid: string) {
   sessionId.value = sid
-  localStorage.setItem('chat_session_id', sid)
+  setSessionId(sid)
   await loadSessionHistory(sid)
   showHistory.value = false
 }
@@ -181,10 +182,10 @@ async function removeSession(sid: string) {
 
 function newSession() {
   sessionId.value = ''
+  clearSessionId()
   messages.value = [
     { role: 'assistant', content: '你好！我是智能旅行助手。你可以直接告诉我你想去哪、喜欢什么，我会帮你自动填写表单；在结果页我还能帮你AI调整行程！' }
   ]
-  localStorage.removeItem('chat_session_id')
   showHistory.value = false
 }
 
@@ -214,6 +215,7 @@ function getActionLabel(action: ChatAction): string {
   if (action.type === 'fill_form') return '已自动填写表单'
   if (action.type === 'navigate') return '正在跳转...'
   if (action.type === 'adjust_plan') return '正在AI调整行程...'
+  if (action.type === 'generate_trip') return '正在生成行程...'
   return ''
 }
 
@@ -232,6 +234,9 @@ function handleAction(action: ChatAction) {
     if (feedback) {
       emit('adjust-plan', { target, feedback })
     }
+  } else if (action.type === 'generate_trip') {
+    const tripParams = action.data.trip_params || {}
+    emit('generate-trip', tripParams)
   }
 }
 
@@ -279,7 +284,7 @@ async function sendMessage() {
     })
 
     sessionId.value = res.data.session_id
-    localStorage.setItem('chat_session_id', res.data.session_id)
+    setSessionId(res.data.session_id)
 
     const action: ChatAction | null = res.data.action
     let actionLabel = ''

@@ -1,37 +1,8 @@
 """Agent提示词定义和创建函数"""
 
 from langchain_openai import ChatOpenAI
-from langchain.agents import create_agent
 
 from ..config import get_settings
-from .tools import (
-    search_attractions,
-    search_weather,
-    search_hotels,
-    search_transportation,
-    search_food,
-    get_city_map_info
-)
-
-
-PARENT_AGENT_PROMPT = """你是【父Agent - 旅行规划总调度】。
-
-## 核心职责
-1. **任务分解**: 将用户需求拆解为子任务
-2. **结果整合**: 汇总各子Agent的执行结果
-3. **智能检错**: 检查数据完整性和一致性
-4. **决策判断**: 判断是否需要向用户询问更多信息
-
-## RoC推理模式 (ReAct)
-- **Reasoning (思维)**: 分析用户需求,确定需要哪些信息
-- **Observation (观察)**: 查看已有信息和子Agent返回的结果
-- **Calling (行动)**: 调度合适的子Agent获取缺失信息
-
-## 输出要求
-生成结构化的任务计划JSON,包含:
-- 需要执行的子任务列表
-- 任务优先级和依赖关系
-- 预期产出物描述"""
 
 
 ATTRACTION_AGENT_PROMPT = """你是【景点搜索专家】。
@@ -267,24 +238,4 @@ def create_llm() -> ChatOpenAI:
     )
 
 
-def create_agent_executor(tools: list, system_prompt: str):
-    """创建带RoC模式的Agent执行器 (基于langchain 1.x create_agent)"""
-    llm = create_llm()
-    
-    agent = create_agent(
-        model=llm,
-        tools=tools,
-        system_prompt=system_prompt,
-    )
-    
-    return agent
 
-
-TOOL_MAP = {
-    "attraction": ([search_attractions], ATTRACTION_AGENT_PROMPT),
-    "weather": ([search_weather], WEATHER_AGENT_PROMPT),
-    "hotel": ([search_hotels], HOTEL_AGENT_PROMPT),
-    "transportation": ([search_transportation], TRANSPORTATION_AGENT_PROMPT),
-    "food": ([search_food], FOOD_AGENT_PROMPT),
-    "map": ([get_city_map_info], MAP_AGENT_PROMPT),
-}

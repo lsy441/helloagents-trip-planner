@@ -141,7 +141,7 @@ class LangGraphTripPlannerV2:
                 print(f"✅ [LangGraph v2.0] 旅行计划生成成功!")
                 print(f"   城市: {trip_plan.city}")
                 print(f"   天数: {len(trip_plan.days)}天")
-                print(f"   总预算: ¥{trip_plan.budget.get('total', 0) if trip_plan.budget else 0}")
+                print(f"   总预算: ¥{trip_plan.budget.total if trip_plan.budget else 0}")
                 print(f"{'='*70}\n")
                 
                 return trip_plan

@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     port: int = 8000
 
     # CORS配置 - 使用字符串,在代码中分割
-    cors_origins: str = "http://localhost:5173,http://localhost:5174,http://localhost:3000,http://127.0.0.1:5173,http://127.0.0.1:5174,http://127.0.0.1:3000"
+    cors_origins: str = "http://localhost:5173,http://localhost:5174,http://localhost:3000,http://127.0.0.1:5173,http://127.0.0.1:5174,http://127.0.0.1:3000,http://localhost,http://127.0.0.1"
 
     # 高德地图API配置
     amap_api_key: str = ""
@@ -41,6 +41,27 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_base_url: str = ""
     openai_model: str = ""
+
+    # Redis缓存配置
+    redis_host: str = os.getenv("REDIS_HOST", "localhost")
+    redis_port: int = int(os.getenv("REDIS_PORT", "6379"))
+    redis_password: str = os.getenv("REDIS_PASSWORD", "")
+    redis_db: int = int(os.getenv("REDIS_DB", "0"))
+
+    # PostgreSQL配置
+    postgres_host: str = os.getenv("POSTGRES_HOST", "localhost")
+    postgres_port: int = int(os.getenv("POSTGRES_PORT", "5432"))
+    postgres_user: str = os.getenv("POSTGRES_USER", "tripplanner")
+    postgres_password: str = os.getenv("POSTGRES_PASSWORD", "tripplanner123")
+    postgres_db: str = os.getenv("POSTGRES_DB", "tripplanner")
+
+    @property
+    def postgres_url(self) -> str:
+        return f"postgresql+asyncpg://{self.postgres_user}:{self.postgres_password}@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
+
+    @property
+    def postgres_sync_url(self) -> str:
+        return f"postgresql+psycopg2://{self.postgres_user}:{self.postgres_password}@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
 
     # 日志配置
     log_level: str = "INFO"

@@ -17,6 +17,7 @@
       @fill-form="onFillForm"
       @adjust-plan="onAdjustPlan"
       @navigate="onNavigate"
+      @generate-trip="onGenerateTrip"
     />
   </div>
 </template>
@@ -31,9 +32,11 @@ const router = useRouter()
 const chatActionHandlers = ref<{
   fillForm: ((data: Record<string, any>) => void) | null
   adjustPlan: ((data: { target: string; feedback: string }) => void) | null
+  generateTrip: ((data: Record<string, any>) => void) | null
 }>({
   fillForm: null,
   adjustPlan: null,
+  generateTrip: null,
 })
 
 provide('chatActionHandlers', chatActionHandlers)
@@ -47,6 +50,12 @@ function onFillForm(data: Record<string, any>) {
 function onAdjustPlan(data: { target: string; feedback: string }) {
   if (chatActionHandlers.value.adjustPlan) {
     chatActionHandlers.value.adjustPlan(data)
+  }
+}
+
+function onGenerateTrip(data: Record<string, any>) {
+  if (chatActionHandlers.value.generateTrip) {
+    chatActionHandlers.value.generateTrip(data)
   }
 }
 

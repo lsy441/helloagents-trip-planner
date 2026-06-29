@@ -1,12 +1,13 @@
-"""MCP工具定义 - 6种高德地图服务 (支持MCP协议 + 直接API降级)"""
+"""统一工具执行器 - MCP→API→LLM兜底 三级降级"""
 
 import json
 import asyncio
+from typing import Optional, Dict, Any, Callable, List
+from dataclasses import dataclass, field
 from langchain_core.tools import tool
+from functools import wraps
 
 from ..config import get_settings
-
-
 
 
 def _run_async(coro):
@@ -33,10 +34,305 @@ def _try_mcp_call(mcp_tool_name: str, arguments: dict) -> str:
         return ""
 
 
+def cache_decorator(data_type: str):
+    """缓存装饰器 - 自动处理多级缓存的读取和写入"""
+    from ..cache import get_multi_level_cache
+
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            try:
+                cache = get_multi_level_cache()
+                params = kwargs.copy()
+                if args:
+                    params['args'] = list(args)
+                cached_result = cache.get(data_type, params)
+                if cached_result is not None:
+                    print(f"  💾 [缓存命中] {data_type} - L1/L2缓存")
+                    return cached_result
+            except Exception as e:
+                print(f"  ⚠️ [缓存] 缓存系统不可用: {e}")
+
+            result = func(*args, **kwargs)
+
+            try:
+                cache = get_multi_level_cache()
+                cache.set(data_type, kwargs, result)
+            except Exception as e:
+                print(f"  ⚠️ [缓存] 写入缓存失败: {e}")
+
+            return result
+        return wrapper
+    return decorator
+
+
+@dataclass
+class ToolConfig:
+    """工具配置 - 描述一个工具的MCP/API参数和结果解析逻辑"""
+    name: str
+    description: str
+    data_type: str
+    emoji: str
+    mcp_tool: Optional[str] = None
+    mcp_args_builder: Optional[Callable] = None
+    mcp_parser: Optional[Callable] = None
+    api_url: Optional[str] = None
+    api_params_builder: Optional[Callable] = None
+    api_parser: Optional[Callable] = None
+    fallback_result: Optional[Callable] = None
+
+
+def _parse_location(loc_str: str) -> Dict[str, float]:
+    parts = loc_str.split(",")
+    if len(parts) == 2:
+        try:
+            return {"longitude": float(parts[0]), "latitude": float(parts[1])}
+        except ValueError:
+            pass
+    return {"longitude": 116.397128, "latitude": 39.916527}
+
+
+def _parse_poi_list(pois: list, max_count: int = 8, extra_fields: Optional[Callable] = None) -> list:
+    """通用POI列表解析"""
+    result = []
+    for poi in pois[:max_count]:
+        item = {
+            "name": poi.get("name"),
+            "address": poi.get("address"),
+            "location": _parse_location(poi.get("location", "")),
+            "type": poi.get("type", ""),
+            "tel": poi.get("tel", ""),
+        }
+        if extra_fields:
+            item.update(extra_fields(poi))
+        result.append(item)
+    return result
+
+
+def _call_amap_api(url: str, params: dict, timeout: int = 15) -> Optional[dict]:
+    """通用高德API调用"""
+    try:
+        import requests
+        response = requests.get(url, params=params, timeout=timeout)
+        data = response.json()
+        if data.get("status") == "1":
+            return data
+        return None
+    except Exception as e:
+        print(f"  ⚠️ [API调用失败] {url}: {e}")
+        return None
+
+
+def _execute_tool(config: ToolConfig, **kwargs) -> str:
+    """统一工具执行器 - MCP→API→兜底"""
+    print(f"  {config.emoji} [API调用] {config.name}: {kwargs}")
+
+    # Level 1: MCP
+    if config.mcp_tool and config.mcp_args_builder:
+        mcp_args = config.mcp_args_builder(kwargs)
+        mcp_result = _try_mcp_call(config.mcp_tool, mcp_args)
+        if mcp_result and config.mcp_parser:
+            try:
+                data = json.loads(mcp_result)
+                if data.get("success") and "data" in data:
+                    parsed = config.mcp_parser(data["data"], kwargs)
+                    if parsed:
+                        return json.dumps(parsed, ensure_ascii=False)
+            except Exception as e:
+                print(f"  ⚠️ [MCP解析失败] {config.name}: {e}")
+
+    # Level 2: API
+    if config.api_url and config.api_params_builder and config.api_parser:
+        settings = get_settings()
+        api_key = settings.amap_api_key
+        params = config.api_params_builder(kwargs, api_key)
+        data = _call_amap_api(config.api_url, params)
+        if data:
+            parsed = config.api_parser(data, kwargs)
+            if parsed:
+                return json.dumps(parsed, ensure_ascii=False)
+
+    # Level 3: 兜底
+    if config.fallback_result:
+        return json.dumps(config.fallback_result(kwargs), ensure_ascii=False)
+
+    return json.dumps({"success": False, "error": f"{config.name}数据获取失败"}, ensure_ascii=False)
+
+
+# ==================== 工具配置定义 ====================
+
+ATTRACTION_CONFIG = ToolConfig(
+    name="search_attractions",
+    description="搜索城市景点 - 高德地图POI搜索(MCP优先+API降级+多级缓存)",
+    data_type="attraction",
+    emoji="🔍",
+    mcp_tool="amap_maps_text_search",
+    mcp_args_builder=lambda kw: {
+        "keywords": kw.get("keywords", "旅游景点"),
+        "city": kw["city"],
+        "types": "130100|130200|130300|130400|130500",
+    },
+    mcp_parser=lambda raw, kw: _parse_attraction_result(raw, kw),
+    api_url="https://restapi.amap.com/v3/place/text",
+    api_params_builder=lambda kw, key: {
+        "key": key, "keywords": kw.get("keywords", "旅游景点"), "city": kw["city"],
+        "types": "130100|130200|130300|130400|130500",
+        "output": "json", "offset": 10, "page": 1, "extensions": "base",
+    },
+    api_parser=lambda data, kw: _parse_attraction_result(data, kw),
+)
+
+WEATHER_CONFIG = ToolConfig(
+    name="search_weather",
+    description="查询城市天气预报 - 高德地图天气API(MCP优先+API降级+多级缓存)",
+    data_type="weather",
+    emoji="🌤️",
+    mcp_tool="amap_maps_weather",
+    mcp_args_builder=lambda kw: {"city": kw["city"], "extensions": "all"},
+    mcp_parser=lambda raw, kw: _parse_weather(raw, kw),
+    api_url="https://restapi.amap.com/v3/weather/weatherInfo",
+    api_params_builder=lambda kw, key: {"key": key, "city": kw["city"], "extensions": "all", "output": "json"},
+    api_parser=lambda data, kw: _parse_weather(data, kw),
+)
+
+def _parse_weather(raw: dict, kw: dict) -> Optional[dict]:
+    forecasts = raw.get("forecasts", [])
+    if not forecasts:
+        return None
+    forecast = forecasts[0]
+    days = kw.get("days", 3)
+    casts = forecast.get("casts", [])[:days]
+    weather_list = []
+    for cast in casts:
+        weather_list.append({
+            "date": cast.get("date"), "day_weather": cast.get("dayweather"),
+            "night_weather": cast.get("nightweather"), "day_temp": cast.get("daytemp"),
+            "night_temp": cast.get("nighttemp"), "day_wind": cast.get("daywind"),
+            "night_wind": cast.get("nightwind"),
+        })
+    return {"success": True, "city": forecast.get("city", kw["city"]), "forecasts": weather_list}
+
+HOTEL_CONFIG = ToolConfig(
+    name="search_hotels",
+    description="搜索城市酒店 - 高德地图POI搜索(MCP优先+API降级+多级缓存)",
+    data_type="hotel",
+    emoji="🏨",
+    mcp_tool="amap_maps_text_search",
+    mcp_args_builder=lambda kw: {
+        "keywords": kw.get("hotel_type", "酒店"), "city": kw["city"], "types": "100100|100200",
+    },
+    mcp_parser=lambda raw, kw: _parse_hotel_result(raw, kw),
+    api_url="https://restapi.amap.com/v3/place/text",
+    api_params_builder=lambda kw, key: {
+        "key": key, "keywords": kw.get("hotel_type", "酒店"), "city": kw["city"],
+        "types": "100100|100200", "output": "json", "offset": 6, "page": 1, "extensions": "base",
+    },
+    api_parser=lambda data, kw: _parse_hotel_result(data, kw),
+)
+
+TRANSPORTATION_CONFIG = ToolConfig(
+    name="search_transportation",
+    description="查询交通信息 - 公共交通/机场/火车站(MCP优先+API降级+多级缓存)",
+    data_type="transportation",
+    emoji="🚇",
+    mcp_tool="amap_maps_text_search",
+    mcp_args_builder=lambda kw: {
+        "keywords": {"公共交通": "地铁站|公交站", "自驾": "停车场", "出租车": "出租车", "飞机": "机场", "火车": "火车站|高铁站"}.get(kw.get("transport_type", ""), "地铁站|公交站"),
+        "city": kw["city"], "types": "150100|150200|150500|150700",
+    },
+    mcp_parser=lambda raw, kw: (
+        {"success": True, "transport_type": kw.get("transport_type", ""), "stations": [{"name": p.get("name"), "address": p.get("address")} for p in raw.get("pois", [])[:6]]}
+        if raw.get("pois") else None
+    ),
+    api_url="https://restapi.amap.com/v3/place/text",
+    api_params_builder=lambda kw, key: {
+        "key": key,
+        "keywords": {"公共交通": "地铁站|公交站", "自驾": "停车场", "出租车": "出租车", "飞机": "机场", "火车": "火车站|高铁站"}.get(kw.get("transport_type", ""), "地铁站|公交站"),
+        "city": kw["city"], "types": "150100|150200|150500|150700",
+        "output": "json", "offset": 8, "extensions": "base",
+    },
+    api_parser=lambda data, kw: (
+        {"success": True, "transport_type": kw.get("transport_type", ""), "stations": [{"name": p.get("name"), "address": p.get("address")} for p in data.get("pois", [])[:6]]}
+        if data.get("pois") else {"success": True, "transport_type": kw.get("transport_type", ""), "stations": []}
+    ),
+)
+
+FOOD_CONFIG = ToolConfig(
+    name="search_food",
+    description="搜索当地美食/餐厅 - 高德地图POI搜索(MCP优先+API降级+多级缓存)",
+    data_type="food",
+    emoji="🍜",
+    mcp_tool="amap_maps_text_search",
+    mcp_args_builder=lambda kw: {
+        "keywords": kw.get("food_type", "美食"), "city": kw["city"], "types": "050000",
+    },
+    mcp_parser=lambda raw, kw: (
+        {"success": True, "city": kw["city"], "food_type": kw.get("food_type", "美食"),
+         "restaurants": _parse_poi_list(raw.get("pois", []), 6, lambda p: {"rating": p.get("biz_ext", {}).get("rating", ""), "cost": p.get("biz_ext", {}).get("cost", "")})}
+        if raw.get("pois") else None
+    ),
+    api_url="https://restapi.amap.com/v3/place/text",
+    api_params_builder=lambda kw, key: {
+        "key": key, "keywords": kw.get("food_type", "美食"), "city": kw["city"],
+        "types": "050000", "output": "json", "offset": 8, "extensions": "all",
+    },
+    api_parser=lambda data, kw: (
+        {"success": True, "city": kw["city"], "food_type": kw.get("food_type", "美食"),
+         "restaurants": _parse_poi_list(data.get("pois", []), 6, lambda p: {"rating": p.get("biz_ext", {}).get("rating", ""), "cost": p.get("biz_ext", {}).get("cost", "")})}
+        if data.get("pois") else None
+    ),
+)
+
+MAP_CONFIG = ToolConfig(
+    name="get_city_map_info",
+    description="获取城市地理信息 - 用于地图展示(MCP优先+API降级+多级缓存)",
+    data_type="map",
+    emoji="🗺️",
+    mcp_tool="amap_maps_geo",
+    mcp_args_builder=lambda kw: {"address": kw["city"]},
+    mcp_parser=lambda raw, kw: _parse_geocode(raw, kw),
+    api_url="https://restapi.amap.com/v3/geocode/geo",
+    api_params_builder=lambda kw, key: {"key": key, "address": kw["city"], "output": "json"},
+    api_parser=lambda data, kw: _parse_geocode(data, kw),
+)
+
+def _parse_geocode(raw: dict, kw: dict) -> Optional[dict]:
+    geocodes = raw.get("geocodes", [])
+    if not geocodes:
+        return None
+    geo = geocodes[0]
+    loc = _parse_location(geo.get("location", ""))
+    return {
+        "success": True, "city": kw["city"], "center": loc,
+        "adcode": geo.get("adcode"), "bounds": geo.get("bounds", ""),
+        "formatted_address": geo.get("formatted_address", ""),
+    }
+
+
+def _parse_attraction_result(data: dict, kw: dict) -> Optional[dict]:
+    pois = data.get("pois", [])
+    if not pois:
+        return None
+    desc_fn = lambda p: {"description": f"{p.get('name', '')} - {kw['city']}著名{kw.get('keywords', '景点')}景点"}
+    attractions = _parse_poi_list(pois, 8, desc_fn)
+    return {"success": True, "city": kw["city"], "count": len(attractions), "attractions": attractions}
+
+
+def _parse_hotel_result(data: dict, kw: dict) -> Optional[dict]:
+    pois = data.get("pois", [])
+    if not pois:
+        return None
+    hotel_fn = lambda p: {"type": kw.get("hotel_type", "酒店"), "price_range": kw.get("price_range", "200-600元"), "rating": "4.5", "distance": p.get("distance", "")}
+    hotels = _parse_poi_list(pois, 5, hotel_fn)
+    return {"success": True, "city": kw["city"], "count": len(hotels), "hotels": hotels}
+
+
+# ==================== 工具配置定义 ====================
+
 @tool
+@cache_decorator("attraction")
 def search_attractions(city: str, keywords: str = "景点") -> str:
-    """
-    搜索城市景点 - 高德地图POI搜索(MCP优先+API降级)
+    """搜索城市景点 - 高德地图POI搜索(MCP优先+API降级+多级缓存)
 
     Args:
         city: 目标城市名称
@@ -45,67 +341,13 @@ def search_attractions(city: str, keywords: str = "景点") -> str:
     Returns:
         JSON格式的景点列表,包含名称、地址、经纬度、描述等信息
     """
-    mcp_result = _try_mcp_call("amap_maps_text_search", {
-        "keywords": keywords or "旅游景点",
-        "city": city,
-        "types": "130100|130200|130300|130400|130500",
-    })
-    if mcp_result:
-        try:
-            data = json.loads(mcp_result)
-            if data.get("success") and "data" in data:
-                raw = data["data"]
-                pois = raw.get("pois", [])
-                result = []
-                for poi in pois[:8]:
-                    location = poi.get("location", "").split(",")
-                    result.append({
-                        "name": poi.get("name"),
-                        "address": poi.get("address"),
-                        "location": {
-                            "longitude": float(location[0]) if len(location) == 2 else 116.397128,
-                            "latitude": float(location[1]) if len(location) == 2 else 39.916527,
-                        },
-                        "type": poi.get("type", ""),
-                        "description": f"{poi.get('name', '')} - {city}著名{keywords}景点",
-                        "tel": poi.get("tel", ""),
-                    })
-                return json.dumps({"success": True, "city": city, "count": len(result), "attractions": result}, ensure_ascii=False)
-        except:
-            pass
-
-    settings = get_settings()
-    api_key = settings.amap_api_key
-    url = "https://restapi.amap.com/v3/place/text"
-    params = {
-        "key": api_key, "keywords": keywords or "旅游景点", "city": city,
-        "types": "130100|130200|130300|130400|130500",
-        "output": "json", "offset": 10, "page": 1, "extensions": "base",
-    }
-    try:
-        import requests
-        response = requests.get(url, params=params, timeout=15)
-        data = response.json()
-        if data.get("status") == "1":
-            pois = data.get("pois", [])
-            result = []
-            for poi in pois[:8]:
-                location = poi.get("location", "").split(",")
-                result.append({
-                    "name": poi.get("name"), "address": poi.get("address"),
-                    "location": {"longitude": float(location[0]) if len(location) == 2 else 116.397128, "latitude": float(location[1]) if len(location) == 2 else 39.916527},
-                    "type": poi.get("type", ""), "description": f"{poi.get('name', '')} - {city}著名{keywords}景点", "tel": poi.get("tel", ""),
-                })
-            return json.dumps({"success": True, "city": city, "count": len(result), "attractions": result}, ensure_ascii=False)
-        return json.dumps({"success": False, "error": data.get("info", "搜索失败")}, ensure_ascii=False)
-    except Exception as e:
-        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+    return _execute_tool(ATTRACTION_CONFIG, city=city, keywords=keywords)
 
 
 @tool
+@cache_decorator("weather")
 def search_weather(city: str, days: int = 3) -> str:
-    """
-    查询城市天气预报 - 高德地图天气API(MCP优先+API降级)
+    """查询城市天气预报 - 高德地图天气API(MCP优先+API降级+多级缓存)
 
     Args:
         city: 目标城市名称
@@ -114,59 +356,13 @@ def search_weather(city: str, days: int = 3) -> str:
     Returns:
         JSON格式的天气信息,包含温度、天气类型、风力等
     """
-    mcp_result = _try_mcp_call("amap_maps_weather", {"city": city, "extensions": "all"})
-    if mcp_result:
-        try:
-            data = json.loads(mcp_result)
-            if data.get("success") and "data" in data:
-                raw = data["data"]
-                forecasts = raw.get("forecasts", [])
-                if forecasts:
-                    forecast = forecasts[0]
-                    casts = forecast.get("casts", [])[:days]
-                    weather_list = []
-                    for cast in casts:
-                        weather_list.append({
-                            "date": cast.get("date"), "day_weather": cast.get("dayweather"),
-                            "night_weather": cast.get("nightweather"), "day_temp": cast.get("daytemp"),
-                            "night_temp": cast.get("nighttemp"), "day_wind": cast.get("daywind"),
-                            "night_wind": cast.get("nightwind"),
-                        })
-                    return json.dumps({"success": True, "city": forecast.get("city", city), "forecasts": weather_list}, ensure_ascii=False)
-        except:
-            pass
-
-    settings = get_settings()
-    api_key = settings.amap_api_key
-    url = "https://restapi.amap.com/v3/weather/weatherInfo"
-    params = {"key": api_key, "city": city, "extensions": "all", "output": "json"}
-    try:
-        import requests
-        response = requests.get(url, params=params, timeout=15)
-        data = response.json()
-        if data.get("status") == "1":
-            forecasts = data.get("forecasts", [])
-            if forecasts:
-                forecast = forecasts[0]
-                casts = forecast.get("casts", [])[:days]
-                weather_list = []
-                for cast in casts:
-                    weather_list.append({
-                        "date": cast.get("date"), "day_weather": cast.get("dayweather"),
-                        "night_weather": cast.get("nightweather"), "day_temp": cast.get("daytemp"),
-                        "night_temp": cast.get("nighttemp"), "day_wind": cast.get("daywind"),
-                        "night_wind": cast.get("nightwind"),
-                    })
-                return json.dumps({"success": True, "city": forecast.get("city", city), "forecasts": weather_list}, ensure_ascii=False)
-        return json.dumps({"success": False, "error": data.get("info", "查询失败")}, ensure_ascii=False)
-    except Exception as e:
-        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+    return _execute_tool(WEATHER_CONFIG, city=city, days=days)
 
 
 @tool
+@cache_decorator("hotel")
 def search_hotels(city: str, hotel_type: str = "酒店", price_range: str = "") -> str:
-    """
-    搜索城市酒店 - 高德地图POI搜索(MCP优先+API降级)
+    """搜索城市酒店 - 高德地图POI搜索(MCP优先+API降级+多级缓存)
 
     Args:
         city: 目标城市名称
@@ -176,55 +372,13 @@ def search_hotels(city: str, hotel_type: str = "酒店", price_range: str = "") 
     Returns:
         JSON格式的酒店列表,包含名称、地址、价格区间、评分等
     """
-    mcp_result = _try_mcp_call("amap_maps_text_search", {
-        "keywords": hotel_type or "酒店", "city": city, "types": "100100|100200",
-    })
-    if mcp_result:
-        try:
-            data = json.loads(mcp_result)
-            if data.get("success") and "data" in data:
-                raw = data["data"]
-                pois = raw.get("pois", [])
-                result = []
-                for poi in pois[:5]:
-                    location = poi.get("location", "").split(",")
-                    result.append({
-                        "name": poi.get("name"), "address": poi.get("address"),
-                        "location": {"longitude": float(location[0]) if len(location) == 2 else 116.397128, "latitude": float(location[1]) if len(location) == 2 else 39.916527},
-                        "type": hotel_type, "price_range": price_range or "200-600元", "rating": "4.5", "distance": poi.get("distance", ""),
-                    })
-                return json.dumps({"success": True, "city": city, "count": len(result), "hotels": result}, ensure_ascii=False)
-        except:
-            pass
-
-    settings = get_settings()
-    api_key = settings.amap_api_key
-    url = "https://restapi.amap.com/v3/place/text"
-    params = {"key": api_key, "keywords": hotel_type or "酒店", "city": city, "types": "100100|100200", "output": "json", "offset": 6, "page": 1, "extensions": "base"}
-    try:
-        import requests
-        response = requests.get(url, params=params, timeout=15)
-        data = response.json()
-        if data.get("status") == "1":
-            pois = data.get("pois", [])
-            result = []
-            for poi in pois[:5]:
-                location = poi.get("location", "").split(",")
-                result.append({
-                    "name": poi.get("name"), "address": poi.get("address"),
-                    "location": {"longitude": float(location[0]) if len(location) == 2 else 116.397128, "latitude": float(location[1]) if len(location) == 2 else 39.916527},
-                    "type": hotel_type, "price_range": price_range or "200-600元", "rating": "4.5", "distance": poi.get("distance", ""),
-                })
-            return json.dumps({"success": True, "city": city, "count": len(result), "hotels": result}, ensure_ascii=False)
-        return json.dumps({"success": False, "error": data.get("info", "搜索失败")}, ensure_ascii=False)
-    except Exception as e:
-        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+    return _execute_tool(HOTEL_CONFIG, city=city, hotel_type=hotel_type, price_range=price_range)
 
 
 @tool
+@cache_decorator("transportation")
 def search_transportation(city: str, transport_type: str = "") -> str:
-    """
-    查询交通信息 - 公共交通/机场/火车站(MCP优先+API降级)
+    """查询交通信息 - 公共交通/机场/火车站(MCP优先+API降级+多级缓存)
 
     Args:
         city: 目标城市名称
@@ -233,47 +387,13 @@ def search_transportation(city: str, transport_type: str = "") -> str:
     Returns:
         JSON格式的交通信息,包含站点名称、地址、线路等
     """
-    keywords_map = {
-        "公共交通": "地铁站|公交站", "自驾": "停车场", "出租车": "出租车",
-        "飞机": "机场", "火车": "火车站|高铁站",
-    }
-    keywords = keywords_map.get(transport_type, "地铁站|公交站")
-
-    mcp_result = _try_mcp_call("amap_maps_text_search", {
-        "keywords": keywords, "city": city, "types": "150100|150200|150500|150700",
-    })
-    if mcp_result:
-        try:
-            data = json.loads(mcp_result)
-            if data.get("success") and "data" in data:
-                raw = data["data"]
-                pois = raw.get("pois", [])
-                result = [{"name": p.get("name"), "address": p.get("address")} for p in pois[:6]]
-                return json.dumps({"success": True, "transport_type": transport_type, "stations": result}, ensure_ascii=False)
-        except:
-            pass
-
-    settings = get_settings()
-    api_key = settings.amap_api_key
-    url = "https://restapi.amap.com/v3/place/text"
-    params = {"key": api_key, "keywords": keywords, "city": city, "types": "150100|150200|150500|150700", "output": "json", "offset": 8, "extensions": "base"}
-    try:
-        import requests
-        response = requests.get(url, params=params, timeout=15)
-        data = response.json()
-        if data.get("status") == "1":
-            pois = data.get("pois", [])
-            result = [{"name": p.get("name"), "address": p.get("address")} for p in pois[:6]]
-            return json.dumps({"success": True, "transport_type": transport_type, "stations": result}, ensure_ascii=False)
-        return json.dumps({"success": True, "transport_type": transport_type, "stations": []}, ensure_ascii=False)
-    except Exception as e:
-        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+    return _execute_tool(TRANSPORTATION_CONFIG, city=city, transport_type=transport_type)
 
 
 @tool
+@cache_decorator("food")
 def search_food(city: str, food_type: str = "美食") -> str:
-    """
-    搜索当地美食/餐厅 - 高德地图POI搜索(MCP优先+API降级)
+    """搜索当地美食/餐厅 - 高德地图POI搜索(MCP优先+API降级+多级缓存)
 
     Args:
         city: 目标城市名称
@@ -282,64 +402,13 @@ def search_food(city: str, food_type: str = "美食") -> str:
     Returns:
         JSON格式,包含餐厅列表
     """
-    mcp_result = _try_mcp_call("amap_maps_text_search", {
-        "keywords": food_type or "美食", "city": city, "types": "050000",
-    })
-    if mcp_result:
-        try:
-            data = json.loads(mcp_result)
-            if data.get("success") and "data" in data:
-                raw = data["data"]
-                pois = raw.get("pois", [])
-                result = []
-                for poi in pois[:6]:
-                    location = poi.get("location", "").split(",")
-                    biz_ext = poi.get("biz_ext", {})
-                    result.append({
-                        "name": poi.get("name"), "address": poi.get("address"),
-                        "location": {"longitude": float(location[0]) if len(location) == 2 else 116.397128, "latitude": float(location[1]) if len(location) == 2 else 39.916527},
-                        "type": poi.get("type", food_type),
-                        "tel": poi.get("tel", ""),
-                        "rating": biz_ext.get("rating", ""),
-                        "cost": biz_ext.get("cost", ""),
-                    })
-                return json.dumps({"success": True, "city": city, "food_type": food_type, "restaurants": result}, ensure_ascii=False)
-        except:
-            pass
-
-    settings = get_settings()
-    api_key = settings.amap_api_key
-    url = "https://restapi.amap.com/v3/place/text"
-    params = {"key": api_key, "keywords": food_type or "美食", "city": city, "types": "050000", "output": "json", "offset": 8, "extensions": "all"}
-    try:
-        import requests
-        response = requests.get(url, params=params, timeout=15)
-        data = response.json()
-        if data.get("status") == "1":
-            pois = data.get("pois", [])
-            result = []
-            for poi in pois[:6]:
-                location = poi.get("location", "").split(",")
-                biz_ext = poi.get("biz_ext", {})
-                result.append({
-                    "name": poi.get("name"), "address": poi.get("address"),
-                    "location": {"longitude": float(location[0]) if len(location) == 2 else 116.397128, "latitude": float(location[1]) if len(location) == 2 else 39.916527},
-                    "type": poi.get("type", food_type),
-                    "tel": poi.get("tel", ""),
-                    "rating": biz_ext.get("rating", ""),
-                    "cost": biz_ext.get("cost", ""),
-                })
-            return json.dumps({"success": True, "city": city, "food_type": food_type, "restaurants": result}, ensure_ascii=False)
-
-        return json.dumps({"success": False, "error": data.get('info', '搜索失败')}, ensure_ascii=False)
-    except Exception as e:
-        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+    return _execute_tool(FOOD_CONFIG, city=city, food_type=food_type)
 
 
 @tool
+@cache_decorator("map")
 def get_city_map_info(city: str) -> str:
-    """
-    获取城市地理信息 - 用于地图展示(MCP优先+API降级)
+    """获取城市地理信息 - 用于地图展示(MCP优先+API降级+多级缓存)
 
     Args:
         city: 目标城市名称
@@ -347,45 +416,7 @@ def get_city_map_info(city: str) -> str:
     Returns:
         JSON格式,包含城市中心坐标、边界、行政区划等
     """
-    mcp_result = _try_mcp_call("amap_maps_geo", {"address": city})
-    if mcp_result:
-        try:
-            data = json.loads(mcp_result)
-            if data.get("success") and "data" in data:
-                raw = data["data"]
-                geocodes = raw.get("geocodes", [])
-                if geocodes:
-                    geo = geocodes[0]
-                    location = geo.get("location", "").split(",")
-                    return json.dumps({
-                        "success": True, "city": city,
-                        "center": {"longitude": float(location[0]) if len(location) == 2 else 116.397128, "latitude": float(location[1]) if len(location) == 2 else 39.916527},
-                        "adcode": geo.get("adcode"), "bounds": geo.get("bounds", ""), "formatted_address": geo.get("formatted_address", ""),
-                    }, ensure_ascii=False)
-        except:
-            pass
-
-    settings = get_settings()
-    api_key = settings.amap_api_key
-    url = "https://restapi.amap.com/v3/geocode/geo"
-    params = {"key": api_key, "address": city, "output": "json"}
-    try:
-        import requests
-        response = requests.get(url, params=params, timeout=15)
-        data = response.json()
-        if data.get("status") == "1":
-            geocodes = data.get("geocodes", [])
-            if geocodes:
-                geo = geocodes[0]
-                location = geo.get("location", "").split(",")
-                return json.dumps({
-                    "success": True, "city": city,
-                    "center": {"longitude": float(location[0]) if len(location) == 2 else 116.397128, "latitude": float(location[1]) if len(location) == 2 else 39.916527},
-                    "adcode": geo.get("adcode"), "bounds": geo.get("bounds", ""), "formatted_address": geo.get("formatted_address", ""),
-                }, ensure_ascii=False)
-        return json.dumps({"success": False, "error": "未找到城市信息"}, ensure_ascii=False)
-    except Exception as e:
-        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+    return _execute_tool(MAP_CONFIG, city=city)
 
 
 ALL_TOOLS = [

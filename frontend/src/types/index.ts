@@ -93,6 +93,7 @@ export interface TripPlanResponse {
   success: boolean
   message: string
   data?: TripPlan
+  session_id?: string
 }
 
 // 反馈调整请求
@@ -100,19 +101,5 @@ export interface FeedbackRequest {
   original_request: TripFormData
   feedback: string
   target?: string
-}
-
-// Agent执行状态 (LangGraph v2.0)
-export interface AgentStatus {
-  name: string
-  status: 'pending' | 'running' | 'completed' | 'error'
-  result?: string
-  error?: string
-}
-
-export interface WorkflowStatus {
-  phase: 'plan' | 'execute' | 'replan' | 'complete'
-  agents: AgentStatus[]
-  progress: number
 }
 

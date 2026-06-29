@@ -207,7 +207,7 @@
 import { ref, reactive, watch, inject, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
-import { generateTripPlanStream } from '@/services/api'
+import { generateTripPlanStream, generateTripWithContext, getSessionId, setSessionId } from '@/services/api'
 import type { TripFormData } from '@/types'
 import type { Dayjs } from 'dayjs'
 
@@ -219,6 +219,7 @@ const loadingStatus = ref('')
 interface ChatActionHandlers {
   fillForm: ((data: Record<string, any>) => void) | null
   adjustPlan: ((data: { target: string; feedback: string }) => void) | null
+  generateTrip: ((data: Record<string, any>) => void) | null
 }
 
 const chatActionHandlers = inject<{ value: ChatActionHandlers }>('chatActionHandlers')
@@ -276,15 +277,66 @@ function handleChatFillForm(data: Record<string, any>) {
   message.success('已从对话助手自动填写表单')
 }
 
+async function handleChatGenerateTrip(tripParams: Record<string, any>) {
+  loading.value = true
+  loadingProgress.value = 0
+  loadingStatus.value = '正在通过上下文生成行程...'
+
+  const progressInterval = setInterval(() => {
+    if (loadingProgress.value < 90) {
+      loadingProgress.value += 10
+      if (loadingProgress.value <= 30) {
+        loadingStatus.value = '🔍 正在合并上下文参数...'
+      } else if (loadingProgress.value <= 60) {
+        loadingStatus.value = '🏨 正在规划行程...'
+      } else {
+        loadingStatus.value = '📋 正在生成行程计划...'
+      }
+    }
+  }, 500)
+
+  try {
+    const sid = getSessionId()
+    const response = await generateTripWithContext(sid, tripParams as TripFormData)
+
+    clearInterval(progressInterval)
+    loadingProgress.value = 100
+    loadingStatus.value = '✅ 完成!'
+
+    if (response.success && response.data) {
+      if (sid) setSessionId(sid)
+      localStorage.setItem('tripPlan', JSON.stringify(response.data))
+      localStorage.setItem('tripFormData', JSON.stringify(tripParams))
+      message.success('旅行计划生成成功!')
+      setTimeout(() => {
+        router.push('/result')
+      }, 500)
+    } else {
+      message.error(response.message || '生成失败')
+    }
+  } catch (error: any) {
+    clearInterval(progressInterval)
+    message.error(error.message || '生成旅行计划失败,请稍后重试')
+  } finally {
+    setTimeout(() => {
+      loading.value = false
+      loadingProgress.value = 0
+      loadingStatus.value = ''
+    }, 1000)
+  }
+}
+
 onMounted(() => {
   if (chatActionHandlers?.value) {
     chatActionHandlers.value.fillForm = handleChatFillForm
+    chatActionHandlers.value.generateTrip = handleChatGenerateTrip
   }
 })
 
 onUnmounted(() => {
   if (chatActionHandlers?.value) {
     chatActionHandlers.value.fillForm = null
+    chatActionHandlers.value.generateTrip = null
   }
 })
 

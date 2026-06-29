@@ -397,9 +397,9 @@ import AMapLoader from '@amap/amap-jsapi-loader'
 import html2canvas from 'html2canvas'
 import jsPDF from 'jspdf'
 import type { TripPlan, FeedbackRequest } from '@/types'
-import { updatePlanWithFeedback } from '@/services/api'
+import { updatePlanWithFeedback, generateTripWithContext, getSessionId, setSessionId } from '@/services/api'
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || ''
 
 const router = useRouter()
 const tripPlan = ref<TripPlan | null>(null)
@@ -430,6 +430,7 @@ const quickFeedbackOptions = [
 interface ChatActionHandlers {
   fillForm: ((data: Record<string, any>) => void) | null
   adjustPlan: ((data: { target: string; feedback: string }) => void) | null
+  generateTrip: ((data: Record<string, any>) => void) | null
 }
 
 const chatActionHandlers = inject<{ value: ChatActionHandlers }>('chatActionHandlers')
@@ -468,6 +469,33 @@ async function handleChatAdjustPlan(data: { target: string; feedback: string }) 
   }
 }
 
+async function handleChatGenerateTrip(tripParams: Record<string, any>) {
+  feedbackLoading.value = true
+  try {
+    const sid = getSessionId()
+    const response = await generateTripWithContext(sid, tripParams as any)
+
+    if (response.success && response.data) {
+      if (sid) setSessionId(sid)
+      tripPlan.value = response.data
+      localStorage.setItem('tripPlan', JSON.stringify(response.data))
+      localStorage.setItem('tripFormData', JSON.stringify(tripParams))
+      originalFormData.value = tripParams
+      await loadAttractionPhotos()
+      if (map) { map.destroy() }
+      await nextTick()
+      initMap()
+      message.success('✅ 已根据上下文重新生成行程!')
+    } else {
+      throw new Error(response.message || '生成失败')
+    }
+  } catch (error: any) {
+    message.error(`生成失败: ${error.message || '未知错误'}`)
+  } finally {
+    feedbackLoading.value = false
+  }
+}
+
 onMounted(async () => {
   const data = localStorage.getItem('tripPlan')
   if (data) {
@@ -483,12 +511,14 @@ onMounted(async () => {
 
   if (chatActionHandlers?.value) {
     chatActionHandlers.value.adjustPlan = handleChatAdjustPlan
+    chatActionHandlers.value.generateTrip = handleChatGenerateTrip
   }
 })
 
 onUnmounted(() => {
   if (chatActionHandlers?.value) {
     chatActionHandlers.value.adjustPlan = null
+    chatActionHandlers.value.generateTrip = null
   }
 })
 

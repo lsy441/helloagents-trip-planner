@@ -1,13 +1,5 @@
 """FastAPI主应用"""
 
-import sys
-import io
-
-# Windows 下强制 UTF-8 输出，Emoji 完美显示 ✅
-if sys.platform == "win32":
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
-
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from ..config import get_settings, validate_config, print_config
@@ -29,7 +21,7 @@ app = FastAPI(
 # 配置CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.get_cors_origins_list(),
+    allow_origins=["*"],  # 允许所有来源（开发环境）
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -48,10 +40,8 @@ async def startup_event():
     print(f"[START] {settings.app_name} v{settings.app_version}")
     print("="*60)
     
-    # 打印配置信息
     print_config()
     
-    # 验证配置
     try:
         validate_config()
         print("\n[OK] 配置验证通过")
@@ -59,6 +49,13 @@ async def startup_event():
         print(f"\n[ERROR] 配置验证失败:\n{e}")
         print("\n请检查.env文件并确保所有必要的配置项都已设置")
         raise
+
+    try:
+        from ..services.database import init_db
+        await init_db()
+        print("[OK] PostgreSQL数据库初始化完成")
+    except Exception as e:
+        print(f"[WARN] PostgreSQL初始化失败(将使用内存+Redis): {e}")
     
     print("\n" + "="*60)
     print("API文档: http://localhost:8000/docs")
@@ -69,6 +66,11 @@ async def startup_event():
 @app.on_event("shutdown")
 async def shutdown_event():
     """应用关闭事件"""
+    try:
+        from ..services.database import close_db
+        await close_db()
+    except Exception:
+        pass
     print("\n" + "="*60)
     print("[STOP] 应用正在关闭...")
     print("="*60 + "\n")
@@ -105,11 +107,41 @@ async def metrics():
     try:
         from ..mcp.cache import get_mcp_cache
         cache = get_mcp_cache()
-        summary["cache"] = cache.stats()
+        summary["mcp_cache"] = cache.stats()
     except Exception:
         pass
 
+    try:
+        from ..cache import get_multi_level_cache
+        multi_cache = get_multi_level_cache()
+        summary["multi_level_cache"] = multi_cache.stats()
+    except Exception as e:
+        summary["multi_level_cache"] = {"error": str(e), "available": False}
+
     return summary
+
+
+@app.get("/cache/stats")
+async def cache_stats():
+    """获取多级缓存统计信息"""
+    try:
+        from ..cache import get_multi_level_cache
+        cache = get_multi_level_cache()
+        return {"success": True, "data": cache.stats()}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/cache/clear")
+async def clear_cache():
+    """清空所有缓存"""
+    try:
+        from ..cache import get_multi_level_cache
+        cache = get_multi_level_cache()
+        cache.clear()
+        return {"success": True, "message": "缓存已清空"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 
 if __name__ == "__main__":

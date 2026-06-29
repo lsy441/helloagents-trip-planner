@@ -3,6 +3,7 @@
 import json
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 from .state import TripPlannerState, get_cache
@@ -90,9 +91,6 @@ def plan_node(state: TripPlannerState) -> dict:
         "is_cached": False,
         "execution_results": {}
     }
-
-
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 def _execute_tool_sync(tool_name: str, tool_func) -> tuple[str, str]:

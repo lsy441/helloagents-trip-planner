@@ -2,49 +2,26 @@
 
 import time
 import functools
+import sys
 from typing import Dict, Optional, Callable, Any
 from datetime import datetime
 
+from loguru import logger
 
-try:
-    from loguru import logger
-    _loguru_available = True
-except ImportError:
-    _loguru_available = False
-
-    class _FallbackLogger:
-        def info(self, msg: str, **kwargs):
-            print(f"[INFO] {msg}")
-        def warning(self, msg: str, **kwargs):
-            print(f"[WARN] {msg}")
-        def error(self, msg: str, **kwargs):
-            print(f"[ERROR] {msg}")
-        def debug(self, msg: str, **kwargs):
-            print(f"[DEBUG] {msg}")
-        def success(self, msg: str, **kwargs):
-            print(f"[OK] {msg}")
-        def opt(self, **kwargs):
-            return self
-
-    logger = _FallbackLogger()
-
-
-if _loguru_available:
-    import sys
-    logger.remove()
-    logger.add(
-        sys.stderr,
-        format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
-        level="INFO",
-        colorize=True,
-    )
-    logger.add(
-        "logs/app_{time:YYYY-MM-DD}.log",
-        rotation="10 MB",
-        retention="7 days",
-        level="DEBUG",
-        encoding="utf-8",
-    )
+logger.remove()
+logger.add(
+    sys.stderr,
+    format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
+    level="INFO",
+    colorize=True,
+)
+logger.add(
+    "logs/app_{time:YYYY-MM-DD}.log",
+    rotation="10 MB",
+    retention="7 days",
+    level="DEBUG",
+    encoding="utf-8",
+)
 
 
 class MetricsCollector:
@@ -103,13 +80,7 @@ def get_metrics_collector() -> MetricsCollector:
 
 
 def timer(name: Optional[str] = None):
-    """耗时装饰器 - 记录函数执行时间并输出日志
-
-    用法:
-        @timer("搜索景点")
-        def search_attractions(...):
-            ...
-    """
+    """耗时装饰器 - 记录函数执行时间并输出日志"""
     def decorator(func: Callable) -> Callable:
         timer_name = name or f"{func.__module__}.{func.__name__}"
 

@@ -1,87 +1,101 @@
 import axios from 'axios'
 import type { TripFormData, TripPlanResponse, FeedbackRequest } from '@/types'
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL?.trim() || ''
 
 const apiClient = axios.create({
   baseURL: API_BASE_URL,
-  timeout: 300000, // 5分钟超时
+  timeout: 300000,
   headers: {
     'Content-Type': 'application/json'
   }
 })
 
-// 请求拦截器
 apiClient.interceptors.request.use(
   (config) => {
-    console.log('发送请求:', config.method?.toUpperCase(), config.url)
+    console.log('Request:', config.method?.toUpperCase(), config.url)
     return config
   },
   (error) => {
-    console.error('请求错误:', error)
+    console.error('Request error:', error)
     return Promise.reject(error)
   }
 )
 
-// 响应拦截器
 apiClient.interceptors.response.use(
   (response) => {
-    console.log('收到响应:', response.status, response.config.url)
+    console.log('Response:', response.status, response.config.url)
     return response
   },
   (error) => {
-    console.error('响应错误:', error.response?.status, error.message)
+    console.error('Response error:', error.response?.status, error.message)
     return Promise.reject(error)
   }
 )
 
-/**
- * 生成旅行计划
- */
-export async function generateTripPlan(formData: TripFormData): Promise<TripPlanResponse> {
+const SESSION_KEY = 'trip_session_id'
+
+let _sessionId: string | null = null
+
+export function getSessionId(): string | null {
+  if (!_sessionId) {
+    _sessionId = localStorage.getItem(SESSION_KEY)
+  }
+  return _sessionId
+}
+
+export function setSessionId(sid: string) {
+  _sessionId = sid
+  localStorage.setItem(SESSION_KEY, sid)
+  sessionStorage.setItem(SESSION_KEY, sid)
+}
+
+export function clearSessionId() {
+  _sessionId = null
+  localStorage.removeItem(SESSION_KEY)
+  sessionStorage.removeItem(SESSION_KEY)
+}
+
+export async function generateTripWithContext(sessionId: string | null, tripRequest: TripFormData): Promise<TripPlanResponse> {
   try {
-    const response = await apiClient.post<TripPlanResponse>('/api/trip/plan', formData)
+    const response = await apiClient.post<TripPlanResponse>('/api/trip/plan-with-context', {
+      session_id: sessionId,
+      trip_request: tripRequest
+    })
+    if (response.data.session_id) {
+      setSessionId(response.data.session_id)
+    }
     return response.data
   } catch (error: any) {
-    console.error('生成旅行计划失败:', error)
+    console.error('Generate trip with context failed:', error)
     throw new Error(error.response?.data?.detail || error.message || '生成旅行计划失败')
   }
 }
 
-/**
- * 健康检查
- */
-export async function healthCheck(): Promise<any> {
-  try {
-    const response = await apiClient.get('/api/trip/health')
-    return response.data
-  } catch (error: any) {
-    console.error('健康检查失败:', error)
-    throw new Error(error.message || '健康检查失败')
-  }
-}
-
-/**
- * 基于反馈调整旅行计划 (LangGraph v2.0 反馈机制)
- */
 export async function updatePlanWithFeedback(feedbackReq: FeedbackRequest): Promise<TripPlanResponse> {
   try {
-    const response = await apiClient.post<TripPlanResponse>('/api/trip/feedback', feedbackReq)
+    const params: any = {}
+    const sid = getSessionId()
+    if (sid) {
+      params.session_id = sid
+    }
+    const response = await apiClient.post<TripPlanResponse>('/api/trip/feedback', feedbackReq, { params })
+    if (response.data.session_id) {
+      setSessionId(response.data.session_id)
+    }
     return response.data
   } catch (error: any) {
-    console.error('反馈调整失败:', error)
+    console.error('Feedback failed:', error)
     throw new Error(error.response?.data?.detail || error.message || '反馈调整失败')
   }
 }
 
-/**
- * SSE流式生成旅行计划 - 实时进度
- */
 export async function generateTripPlanStream(
   formData: TripFormData,
   onProgress?: (message: string) => void
 ): Promise<TripPlanResponse> {
-  const url = `${API_BASE_URL}/api/trip/plan-stream`
+  const sid = getSessionId()
+  const url = `${API_BASE_URL}/api/trip/plan-stream${sid ? `?session_id=${sid}` : ''}`
 
   const response = await fetch(url, {
     method: 'POST',
@@ -95,7 +109,7 @@ export async function generateTripPlanStream(
 
   const reader = response.body?.getReader()
   if (!reader) {
-    throw new Error('不支持流式响应')
+    throw new Error('Stream not supported')
   }
 
   return new Promise((resolve, reject) => {
@@ -105,7 +119,7 @@ export async function generateTripPlanStream(
     function readStream() {
       reader?.read().then(({ done, value }) => {
         if (done) {
-          reject(new Error('流结束无结果'))
+          reject(new Error('Stream ended without result'))
           return
         }
 
@@ -117,6 +131,9 @@ export async function generateTripPlanStream(
           if (line.startsWith('data: ')) {
             try {
               const data = JSON.parse(line.slice(6))
+              if (data.type === 'start' && data.session_id) {
+                setSessionId(data.session_id)
+              }
               if (data.type === 'progress' && onProgress) {
                 onProgress(data.message)
               } else if (data.type === 'result') {
@@ -153,7 +170,7 @@ export async function getChatSessions(): Promise<SessionInfo[]> {
     const response = await apiClient.get<{ sessions: SessionInfo[] }>('/api/chat/sessions')
     return response.data.sessions
   } catch (error: any) {
-    console.error('获取会话列表失败:', error)
+    console.error('Get sessions failed:', error)
     return []
   }
 }
@@ -163,7 +180,7 @@ export async function getChatSession(sessionId: string): Promise<SessionDetail |
     const response = await apiClient.get<SessionDetail>(`/api/chat/sessions/${sessionId}`)
     return response.data
   } catch (error: any) {
-    console.error('获取会话详情失败:', error)
+    console.error('Get session detail failed:', error)
     return null
   }
 }
@@ -171,12 +188,14 @@ export async function getChatSession(sessionId: string): Promise<SessionDetail |
 export async function deleteChatSession(sessionId: string): Promise<boolean> {
   try {
     await apiClient.delete(`/api/chat/sessions/${sessionId}`)
+    if (getSessionId() === sessionId) {
+      clearSessionId()
+    }
     return true
   } catch (error: any) {
-    console.error('删除会话失败:', error)
+    console.error('Delete session failed:', error)
     return false
   }
 }
 
 export default apiClient
-
